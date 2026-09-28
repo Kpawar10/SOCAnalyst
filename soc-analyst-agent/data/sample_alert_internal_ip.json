@@ -1,0 +1,15 @@
+{
+  "alert_id": "ALERT-DEMO-0002",
+  "source": "datadog",
+  "rule_name": "Anomalous Internal Port Scan",
+  "raw_severity": "medium",
+  "host": "SRV-DB-03",
+  "src_ip": "10.0.7.9",
+  "dst_ip": "10.0.7.12",
+  "user": null,
+  "message": "Host 10.0.7.9 scanned 40 ports on 10.0.7.12 within 5 seconds, pattern consistent with lateral movement reconnaissance",
+  "raw_fields": {
+    "ports_scanned": 40,
+    "protocol": "tcp"
+  }
+}

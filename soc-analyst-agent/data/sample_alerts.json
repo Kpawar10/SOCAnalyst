@@ -1,0 +1,17 @@
+{
+  "alert_id": "ALERT-DEMO-0001",
+  "source": "splunk",
+  "rule_name": "Suspicious PowerShell Encoded Command",
+  "raw_severity": "high",
+  "host": "WKSTN-4471",
+  "src_ip": "10.0.4.22",
+  "dst_ip": "185.220.101.47",
+  "user": "j.martinez",
+  "message": "powershell.exe -nop -w hidden -enc SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQA... spawned from outlook.exe, outbound connection to 185.220.101.47:443 within 4 seconds",
+  "raw_fields": {
+    "process_name": "powershell.exe",
+    "parent_process": "outlook.exe",
+    "command_line": "powershell.exe -nop -w hidden -enc SQBFAFgA...",
+    "file_hash": "44d88612fea8a8f36de82e1278abb02f"
+  }
+}

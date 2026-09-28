@@ -1,0 +1,136 @@
+name: CI/CD - Autonomous SOC Analyst
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: soc-analyst-agent
+
+jobs:
+  lint-and-test:
+    name: Lint + Unit Tests + Static Red-Team
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt ruff
+
+      - name: Lint (ruff)
+        run: ruff check src/ tests/
+
+      - name: Unit tests (pipeline + guardrails, fully mocked - no network)
+        run: pytest tests/test_pipeline.py tests/test_guardrails.py -v
+
+      - name: Static prompt-injection guard tests (no API key needed)
+        run: pytest tests/redteam/prompt_injection_tests.py -v -m "not live"
+
+  live-redteam:
+    name: Live Red-Team Suite (against real model)
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: staging   # requires manual approval gate in repo settings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Run live prompt-injection red team
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: pytest tests/redteam/prompt_injection_tests.py -v -m live
+
+  build-and-push:
+    name: Build & Push Container Image
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      id-token: write   # for OIDC auth to AWS, no long-lived keys in CI
+      contents: read
+    outputs:
+      image_uri: ${{ steps.image.outputs.uri }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC, no static keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, push
+        id: image
+        env:
+          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          TAG: ${{ github.sha }}
+        run: |
+          docker build -t $REGISTRY/$ECR_REPOSITORY:$TAG .
+          docker push $REGISTRY/$ECR_REPOSITORY:$TAG
+          echo "uri=$REGISTRY/$ECR_REPOSITORY:$TAG" >> "$GITHUB_OUTPUT"
+
+  terraform-plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: hashicorp/setup-terraform@v3
+      - working-directory: infra/terraform
+        run: |
+          terraform init -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+                          -backend-config="key=soc-analyst/staging.tfstate" \
+                          -backend-config="region=${{ env.AWS_REGION }}" \
+                          -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}"
+          terraform plan -out=tfplan \
+                          -var="container_image=${{ needs.build-and-push.outputs.image_uri }}" \
+                          -var="anthropic_api_key_secret_arn=${{ secrets.ANTHROPIC_SECRET_ARN }}" \
+                          -var="acm_certificate_arn=${{ secrets.ACM_CERT_ARN }}"
+
+  terraform-apply:
+    name: Terraform Apply (staging)
+    runs-on: ubuntu-latest
+    needs: terraform-plan
+    environment: staging   # manual approval gate before touching infra
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: hashicorp/setup-terraform@v3
+      - working-directory: infra/terraform
+        run: |
+          terraform init -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+                          -backend-config="key=soc-analyst/staging.tfstate" \
+                          -backend-config="region=${{ env.AWS_REGION }}" \
+                          -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}"
+          terraform apply -auto-approve \
+                          -var="container_image=${{ needs.build-and-push.outputs.image_uri }}" \
+                          -var="anthropic_api_key_secret_arn=${{ secrets.ANTHROPIC_SECRET_ARN }}" \
+                          -var="acm_certificate_arn=${{ secrets.ACM_CERT_ARN }}"
